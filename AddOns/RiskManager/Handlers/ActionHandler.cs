@@ -23,6 +23,14 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         private readonly Dictionary<string, LockoutState> _lockouts = new Dictionary<string, LockoutState>();
         private readonly object _lock = new object();
 
+        // Cooldown after manual reset - prevents immediate re-trigger
+        private DateTime _lastManualReset = DateTime.MinValue;
+        private const int RESET_COOLDOWN_SECONDS = 5;
+
+        // Use central state for fast lookups
+        private RiskState State => RiskState.Instance;
+        private TradeTracker Trades => RiskState.Instance.Trades;
+
         public ActionHandler()
         {
             // Load persisted lockouts on startup
@@ -51,6 +59,8 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                             Reason = kvp.Value.Reason
                         };
                         _lockouts[kvp.Key] = state;
+                        // Sync to central state
+                        State.SetLocked(kvp.Key, true);
                         LogWarning($"PERSISTED LOCKOUT LOADED: {kvp.Key} - {state.Reason}");
                     }
                 }
@@ -115,6 +125,10 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         /// </summary>
         public bool IsLockedOut(string accountName)
         {
+            // Allow trading during post-reset cooldown
+            if (IsInResetCooldown())
+                return false;
+
             lock (_lock)
             {
                 if (!_lockouts.TryGetValue(accountName, out var state))
@@ -166,8 +180,67 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     ShowAlert(result);
                     break;
 
+                case RuleAction.FlattenPosition:
+                    // Flatten SINGLE position only
+                    var instrument = result.ViolatingInstrument;
+                    if (string.IsNullOrEmpty(instrument))
+                    {
+                        LogWarning("FlattenPosition called but no instrument specified");
+                        return;
+                    }
+
+                    // Check cooldown per instrument
+                    var tradeId = TradeTracker.GetTradeId(account.Name, instrument);
+                    if (!Trades.CanActOn(tradeId))
+                        return;
+
+                    Trades.MarkClosing(tradeId);
+                    State.RecordAction(account.Name);
+
+                    // Get the specific rule that triggered this
+                    var triggeringRule = result.Violations
+                        .Where(v => v.Action == RuleAction.FlattenPosition)
+                        .Select(v => v.Rule)
+                        .FirstOrDefault();
+                    var reason = result.Violations.FirstOrDefault()?.Message ?? "Rule violated";
+
+                    LogError("═══════════════════════════════════════════════════════");
+                    LogError($"   POSITION CLOSED: {instrument}");
+                    LogError($"   Rule: {triggeringRule?.Name ?? "Unknown"}");
+                    LogError($"   Reason: {reason}");
+                    LogError("═══════════════════════════════════════════════════════");
+
+                    // Record to closure history
+                    RecordClosureEvent(account, instrument, triggeringRule?.Name ?? "Unknown", reason, "FlattenPosition");
+
+                    FlattenPosition(account, instrument);
+                    ShowAlert(result);
+                    break;
+
                 case RuleAction.FlattenOnly:
-                    LogWarning("FLATTEN ONLY (no lockout) - closing positions");
+                    // Check if we can take action (cooldown + trade state)
+                    if (!State.CanTakeAction(account.Name))
+                        return;
+
+                    // Mark all positions as closing BEFORE flatten
+                    MarkPositionsClosing(account);
+                    State.RecordAction(account.Name);
+
+                    var flattenRule = result.Violations
+                        .Where(v => v.Action == RuleAction.FlattenOnly)
+                        .Select(v => v.Rule)
+                        .FirstOrDefault();
+                    var flattenReason = result.Violations.FirstOrDefault()?.Message ?? "Rule violated";
+
+                    LogError("═══════════════════════════════════════════════════════");
+                    LogError($"   FLATTEN ALL TRIGGERED (no lockout)");
+                    LogError($"   Rule: {flattenRule?.Name ?? "Unknown"}");
+                    LogError($"   Reason: {flattenReason}");
+                    LogError("═══════════════════════════════════════════════════════");
+
+                    // Record to closure history
+                    RecordClosureEvent(account, null, flattenRule?.Name ?? "Unknown", flattenReason, "FlattenAll");
+
                     FlattenAll(account);
                     ShowAlert(result);
                     break;
@@ -183,8 +256,23 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         /// </summary>
         private void ExecuteLockout(Account account, RuleResult result)
         {
+            // Fast check - already locked?
+            if (State.IsLocked(account.Name))
+                return;
+
+            // Don't re-trigger during post-reset cooldown
+            if (IsInResetCooldown())
+            {
+                LogInfo("Lockout skipped - in post-reset cooldown");
+                return;
+            }
+
             lock (_lock)
             {
+                // Double-check inside lock
+                if (_lockouts.ContainsKey(account.Name) && _lockouts[account.Name].IsLocked)
+                    return;
+
                 // Get the rule that triggered this
                 var triggerRule = result.Violations
                     .Where(v => v.Action == RuleAction.Lockout)
@@ -208,6 +296,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
                 _lockouts[account.Name] = state;
 
+                // Update central state for fast lookups
+                State.SetLocked(account.Name, true);
+
                 LogError("═══════════════════════════════════════════════════════");
                 LogError($"   LOCKOUT ACTIVATED: {account.Name}");
                 LogError($"   Reason: {state.Reason}");
@@ -221,10 +312,90 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             // Persist to disk IMMEDIATELY
             PersistLockouts();
 
+            // Record to closure history
+            var lockoutRule = result.Violations
+                .Where(v => v.Action == RuleAction.Lockout)
+                .Select(v => v.Rule)
+                .FirstOrDefault();
+            var lockoutReason = result.Violations.FirstOrDefault()?.Message ?? "Rule violated";
+            RecordClosureEvent(account, null, lockoutRule?.Name ?? "Unknown", lockoutReason, "Lockout");
+
+            // Mark positions as closing, then execute
+            MarkPositionsClosing(account);
+            State.RecordAction(account.Name);
+
             // Execute lockout actions
             CancelAllOrders(account);
             FlattenAll(account);
             ShowAlert(result, isLockout: true);
+        }
+
+        /// <summary>
+        /// Mark all positions as closing before flatten
+        /// </summary>
+        private void MarkPositionsClosing(Account account)
+        {
+            try
+            {
+                foreach (var pos in account.Positions)
+                {
+                    if (pos.MarketPosition != MarketPosition.Flat)
+                    {
+                        var tradeId = TradeTracker.GetTradeId(account, pos.Instrument);
+                        Trades.MarkClosing(tradeId);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Mark position as closed (call on position update)
+        /// </summary>
+        public void OnPositionClosed(Account account, Instrument instrument)
+        {
+            var tradeId = TradeTracker.GetTradeId(account, instrument);
+            Trades.MarkClosed(tradeId);
+        }
+
+        /// <summary>
+        /// Mark position as active (call on new position)
+        /// </summary>
+        public void OnPositionOpened(Account account, Instrument instrument)
+        {
+            var tradeId = TradeTracker.GetTradeId(account, instrument);
+            Trades.MarkActive(tradeId);
+        }
+
+        /// <summary>
+        /// Flatten a SINGLE position by instrument name
+        /// </summary>
+        public void FlattenPosition(Account account, string instrumentName)
+        {
+            try
+            {
+                LogWarning($"=== FLATTEN POSITION: {instrumentName} ===");
+
+                var position = account.Positions
+                    .FirstOrDefault(p => p.Instrument.FullName == instrumentName &&
+                                        p.MarketPosition != MarketPosition.Flat);
+
+                if (position != null)
+                {
+                    LogInfo($"  Flattening: {position.Instrument.FullName} {position.MarketPosition} {position.Quantity}");
+                    account.Flatten(new[] { position.Instrument });
+                }
+                else
+                {
+                    LogInfo($"  Position not found or already flat: {instrumentName}");
+                }
+
+                LogWarning($"=== FLATTEN POSITION COMPLETED ===");
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error flattening position {instrumentName}: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -234,7 +405,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         {
             try
             {
-                LogWarning($"=== FLATTEN STARTED for {account.Name} ===");
+                LogWarning($"=== FLATTEN ALL STARTED for {account.Name} ===");
 
                 var positionsToFlatten = account.Positions
                     .Where(p => p.MarketPosition != MarketPosition.Flat)
@@ -328,6 +499,8 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             {
                 if (_lockouts.Remove(accountName))
                 {
+                    State.SetLocked(accountName, false);
+                    Trades.ClearAccount(accountName);
                     LogInfo($"Lockout manually cleared for {accountName}");
                     PersistLockouts();
                 }
@@ -342,9 +515,19 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             lock (_lock)
             {
                 _lockouts.Clear();
-                LogInfo("All lockouts cleared");
+                State.Reset();
+                _lastManualReset = DateTime.Now; // Start cooldown
+                LogInfo("All lockouts cleared (5s cooldown before re-trigger)");
             }
             StateManager.ClearLockouts();
+        }
+
+        /// <summary>
+        /// Check if in post-reset cooldown
+        /// </summary>
+        public bool IsInResetCooldown()
+        {
+            return (DateTime.Now - _lastManualReset).TotalSeconds < RESET_COOLDOWN_SECONDS;
         }
 
         /// <summary>
@@ -363,6 +546,42 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             lock (_lock)
             {
                 return _lockouts.TryGetValue(accountName, out var state) ? state : null;
+            }
+        }
+
+        /// <summary>
+        /// Record a closure event to history (persisted to disk)
+        /// </summary>
+        private void RecordClosureEvent(Account account, string instrument, string ruleName, string reason, string actionType)
+        {
+            try
+            {
+                // Get current P&L
+                double pnl = 0;
+                try
+                {
+                    pnl = account.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar)
+                        + account.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar);
+                }
+                catch { }
+
+                var record = new ClosureRecord
+                {
+                    Timestamp = DateTime.Now,
+                    Account = account.Name,
+                    Instrument = instrument,
+                    RuleName = ruleName,
+                    Reason = reason,
+                    ActionType = actionType,
+                    PnLAtClosure = pnl
+                };
+
+                StateManager.RecordClosure(record);
+                LogInfo($"Closure recorded: {actionType} | {instrument ?? "ALL"} | {ruleName}");
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error recording closure: {ex.Message}");
             }
         }
 

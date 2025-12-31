@@ -38,6 +38,11 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         public string PendingOrderSymbol => PendingOrder?.Instrument?.FullName;
         public int PendingOrderSize => PendingOrder?.Quantity ?? 0;
 
+        // Per-Position Rule Tracking
+        // Set by rules to indicate which specific position violated
+        public string ViolatingInstrument { get; set; }
+        public double ViolatingPositionPnL { get; set; }
+
         // Streak Tracking
         public int ConsecutiveLosses { get; set; }
         public int ConsecutiveWins { get; set; }

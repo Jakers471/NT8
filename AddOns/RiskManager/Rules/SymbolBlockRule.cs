@@ -1,5 +1,5 @@
 // SymbolBlockRule.cs
-// Blocks trading on specific instruments
+// Blocks trading on specific instruments and flattens existing positions
 
 #region Using declarations
 using System;
@@ -11,39 +11,93 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 {
     /// <summary>
     /// Symbol block list rule.
-    /// Prevents orders on specified instruments.
+    /// If position exists in blocked symbol → flatten immediately.
+    /// Also blocks new orders on blocked symbols.
     /// </summary>
     public class SymbolBlockRule : RiskRule
     {
-        public List<string> BlockedSymbols { get; set; } = new List<string>();
+        public string BlockListConfig { get; set; } = "";
+        private HashSet<string> _blockedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public SymbolBlockRule()
         {
             Name = "Symbol Block";
-            Description = "Blocks trading on specific instruments";
-            Action = RuleAction.BlockOrder;
+            Description = "Block and flatten specified symbols";
+            Action = RuleAction.FlattenPosition;  // Flatten blocked position
+        }
+
+        /// <summary>
+        /// Parse the comma-separated block list config: "CL, NG, HO"
+        /// </summary>
+        public void ParseConfig()
+        {
+            _blockedSymbols.Clear();
+            if (string.IsNullOrWhiteSpace(BlockListConfig)) return;
+
+            var symbols = BlockListConfig.Split(',');
+            foreach (var sym in symbols)
+            {
+                var trimmed = sym.Trim().ToUpper();
+                if (!string.IsNullOrEmpty(trimmed))
+                    _blockedSymbols.Add(trimmed);
+            }
+        }
+
+        /// <summary>
+        /// Check if a symbol is in the block list (matches root)
+        /// </summary>
+        private bool IsBlocked(string instrumentName)
+        {
+            if (string.IsNullOrEmpty(instrumentName)) return false;
+
+            // Extract symbol root (e.g., "GC" from "GC 02-26")
+            var root = instrumentName.Split(' ')[0].ToUpper();
+
+            // Check exact match on root
+            if (_blockedSymbols.Contains(root))
+                return true;
+
+            // Also check if any blocked symbol is contained in full name
+            return _blockedSymbols.Any(blocked =>
+                instrumentName.IndexOf(blocked, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         public override bool IsViolated(RiskContext context)
         {
-            // Only check if there's a pending order
-            if (string.IsNullOrEmpty(context.PendingOrderSymbol))
-                return false;
+            if (_blockedSymbols.Count == 0) return false;
+            if (context.OpenPositions == null) return false;
 
-            // Check if the symbol is in the block list
-            // Use contains for partial matching (e.g., "ES" matches "ES 03-25")
-            return BlockedSymbols.Any(blocked =>
-                context.PendingOrderSymbol.IndexOf(blocked, StringComparison.OrdinalIgnoreCase) >= 0);
+            // Check if any open position is in a blocked symbol
+            foreach (var pos in context.OpenPositions.Values)
+            {
+                if (IsBlocked(pos.Instrument))
+                {
+                    context.ViolatingInstrument = pos.Instrument;
+                    return true;
+                }
+            }
+
+            // Also check pending orders
+            if (!string.IsNullOrEmpty(context.PendingOrderSymbol) && IsBlocked(context.PendingOrderSymbol))
+            {
+                context.ViolatingInstrument = context.PendingOrderSymbol;
+                return true;
+            }
+
+            return false;
         }
 
         public override string GetViolationMessage(RiskContext context)
         {
-            return $"Symbol blocked: {context.PendingOrderSymbol}";
+            var instrument = context.ViolatingInstrument ?? "Unknown";
+            return $"SYMBOL BLOCKED: {instrument} is on block list. Position closed.";
         }
 
         public override string GetStatusText(RiskContext context)
         {
-            return $"{BlockedSymbols.Count} symbols blocked";
+            if (_blockedSymbols.Count == 0)
+                return "No symbols blocked";
+            return $"Blocked: {string.Join(", ", _blockedSymbols)}";
         }
     }
 }

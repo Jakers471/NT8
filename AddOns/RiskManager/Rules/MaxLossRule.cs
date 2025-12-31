@@ -36,13 +36,17 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
         public override string GetViolationMessage(RiskContext context)
         {
-            return $"Total daily loss limit: ${Math.Abs(context.TotalDailyPnL):F2} / ${MaxLoss:F2}";
+            var pnl = context.TotalDailyPnL;
+            var sign = pnl >= 0 ? "+" : "";
+            return $"Total daily loss limit: {sign}${pnl:F2} (limit: -${MaxLoss:F2})";
         }
 
         public override string GetStatusText(RiskContext context)
         {
-            var remaining = MaxLoss + context.TotalDailyPnL;
-            return $"Total: ${context.TotalDailyPnL:F2} | ${remaining:F2} remaining";
+            var pnl = context.TotalDailyPnL;
+            var sign = pnl >= 0 ? "+" : "";
+            var remaining = MaxLoss + pnl;
+            return $"Total: {sign}${pnl:F2} | ${remaining:F2} until limit";
         }
     }
 }

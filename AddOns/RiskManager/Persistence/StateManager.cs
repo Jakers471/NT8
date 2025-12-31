@@ -20,6 +20,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         private static readonly string DataFolder;
         private static readonly string LockoutFile;
         private static readonly string ConfigFile;
+        private static readonly string HistoryFile;
         private static readonly object _lock = new object();
 
         static StateManager()
@@ -31,6 +32,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
             LockoutFile = Path.Combine(DataFolder, "lockouts.xml");
             ConfigFile = Path.Combine(DataFolder, "config.xml");
+            HistoryFile = Path.Combine(DataFolder, "closure_history.xml");
 
             // Ensure folder exists
             if (!Directory.Exists(DataFolder))
@@ -179,6 +181,115 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         {
             Output.Process($"[RiskManager] {DateTime.Now:HH:mm:ss} {message}", PrintTo.OutputTab1);
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // CLOSURE HISTORY PERSISTENCE
+        // ═══════════════════════════════════════════════════════════════
+
+        private static List<ClosureRecord> _closureHistory = new List<ClosureRecord>();
+        private const int MAX_HISTORY_RECORDS = 100;
+
+        public static void RecordClosure(ClosureRecord record)
+        {
+            lock (_lock)
+            {
+                _closureHistory.Insert(0, record); // Most recent first
+
+                // Keep only last N records
+                if (_closureHistory.Count > MAX_HISTORY_RECORDS)
+                    _closureHistory.RemoveRange(MAX_HISTORY_RECORDS, _closureHistory.Count - MAX_HISTORY_RECORDS);
+
+                SaveClosureHistory();
+            }
+        }
+
+        public static List<ClosureRecord> GetClosureHistory()
+        {
+            lock (_lock)
+            {
+                return new List<ClosureRecord>(_closureHistory);
+            }
+        }
+
+        public static void ClearClosureHistory()
+        {
+            lock (_lock)
+            {
+                _closureHistory.Clear();
+                try
+                {
+                    if (File.Exists(HistoryFile))
+                        File.Delete(HistoryFile);
+                }
+                catch { }
+            }
+        }
+
+        private static void SaveClosureHistory()
+        {
+            try
+            {
+                var storage = new ClosureHistoryStorage { Records = _closureHistory };
+                var serializer = new XmlSerializer(typeof(ClosureHistoryStorage));
+                using (var writer = new StreamWriter(HistoryFile))
+                {
+                    serializer.Serialize(writer, storage);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error saving closure history: {ex.Message}");
+            }
+        }
+
+        public static void LoadClosureHistory()
+        {
+            lock (_lock)
+            {
+                try
+                {
+                    if (!File.Exists(HistoryFile))
+                        return;
+
+                    var serializer = new XmlSerializer(typeof(ClosureHistoryStorage));
+                    using (var reader = new StreamReader(HistoryFile))
+                    {
+                        var storage = (ClosureHistoryStorage)serializer.Deserialize(reader);
+                        _closureHistory = storage.Records ?? new List<ClosureRecord>();
+                    }
+                    Log($"Loaded {_closureHistory.Count} closure history records");
+                }
+                catch (Exception ex)
+                {
+                    Log($"Error loading closure history: {ex.Message}");
+                    _closureHistory = new List<ClosureRecord>();
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CLOSURE HISTORY DATA CLASSES
+    // ═══════════════════════════════════════════════════════════════
+
+    [Serializable]
+    public class ClosureHistoryStorage
+    {
+        public List<ClosureRecord> Records { get; set; } = new List<ClosureRecord>();
+    }
+
+    [Serializable]
+    public class ClosureRecord
+    {
+        public DateTime Timestamp { get; set; }
+        public string Account { get; set; }
+        public string Instrument { get; set; }
+        public string RuleName { get; set; }
+        public string Reason { get; set; }
+        public string ActionType { get; set; }  // "FlattenPosition", "FlattenAll", "Lockout"
+        public double PnLAtClosure { get; set; }
+
+        public string Summary => $"{Timestamp:HH:mm:ss} | {ActionType} | {Instrument ?? "ALL"} | {RuleName}";
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -206,25 +317,59 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
     [Serializable]
     public class RiskConfig
     {
-        // Total Daily Loss Rule
+        // ═══════════════════════════════════════════════════════════════
+        // ACCOUNT-WIDE RULES (Lockout + Flatten ALL)
+        // ═══════════════════════════════════════════════════════════════
+
+        // Total Daily Loss (Realized + Unrealized) → LOCKOUT
         public bool TotalLossEnabled { get; set; } = true;
-        public double TotalLossMax { get; set; } = 500;
+        public double TotalLossMax { get; set; } = 100; // Low for testing
         public int TotalLossResetHour { get; set; } = 18;
 
-        // Unrealized Loss Rule (Floating Stop)
-        public bool FloatingStopEnabled { get; set; } = true;
-        public double FloatingStopMax { get; set; } = 150;
-
-        // Unrealized Profit Rule (Take Profit)
-        public bool TakeProfitEnabled { get; set; } = false;
-        public double TakeProfitTarget { get; set; } = 300;
-
-        // Realized Loss Rule
+        // Daily Realized Loss Only → LOCKOUT
         public bool RealizedLossEnabled { get; set; } = false;
-        public double RealizedLossMax { get; set; } = 400;
+        public double RealizedLossMax { get; set; } = 200;
         public int RealizedLossResetHour { get; set; } = 18;
 
-        // Global settings
+        // Daily Realized Profit → LOCKOUT (take profit for the day)
+        public bool DailyProfitEnabled { get; set; } = false;
+        public double DailyProfitTarget { get; set; } = 500;
+        public int DailyProfitResetHour { get; set; } = 18;
+
+        // ═══════════════════════════════════════════════════════════════
+        // PER-POSITION RULES (Flatten ONLY that position)
+        // ═══════════════════════════════════════════════════════════════
+
+        // Unrealized Loss Per Position → Flatten position
+        public bool PositionStopEnabled { get; set; } = true;
+        public double PositionStopMax { get; set; } = 50; // Low for testing
+
+        // Unrealized Profit Per Position → Flatten position
+        public bool PositionTargetEnabled { get; set; } = false;
+        public double PositionTargetAmount { get; set; } = 100;
+
+        // Max Position Size → Flatten position (per symbol)
+        public bool MaxPositionSizeEnabled { get; set; } = false;
+        public int MaxPositionSizeDefault { get; set; } = 5; // Default if symbol not specified
+        public string MaxPositionSizePerSymbol { get; set; } = "GC=2, ES=3, NQ=2"; // Format: "SYMBOL=MAX, SYMBOL=MAX"
+
+        // ═══════════════════════════════════════════════════════════════
+        // TRADE FREQUENCY RULE (Rolling window limit → Timed lockout)
+        // ═══════════════════════════════════════════════════════════════
+        public bool TradeFrequencyEnabled { get; set; } = false;
+        public int TradeFrequencyMaxTrades { get; set; } = 5;        // Max trades allowed
+        public int TradeFrequencyWindowMinutes { get; set; } = 10;   // Rolling window in minutes
+        public int TradeFrequencyLockoutMinutes { get; set; } = 30;  // Lockout duration in minutes
+
+        // ═══════════════════════════════════════════════════════════════
+        // SYMBOL BLOCK LIST (Flatten position + block orders)
+        // ═══════════════════════════════════════════════════════════════
+        public bool SymbolBlockEnabled { get; set; } = false;
+        public string SymbolBlockList { get; set; } = "";  // Comma-separated: "CL, NG, HO"
+
+        // ═══════════════════════════════════════════════════════════════
+        // GLOBAL SETTINGS
+        // ═══════════════════════════════════════════════════════════════
         public bool SoundEnabled { get; set; } = true;
     }
 }

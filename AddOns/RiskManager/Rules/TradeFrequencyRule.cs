@@ -1,5 +1,6 @@
 // TradeFrequencyRule.cs
-// Triggers when too many trades in a rolling time window
+// Limits trades within a rolling time window
+// If limit hit → timed lockout that persists
 
 #region Using declarations
 using System;
@@ -10,20 +11,20 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
     /// <summary>
     /// Trade frequency rule with rolling window.
     /// Triggers when X trades occur within Y minutes.
-    /// Supports timed lockout that auto-resets.
+    /// Results in timed lockout that persists across restarts.
     /// </summary>
     public class TradeFrequencyRule : RiskRule
     {
-        public int MaxTrades { get; set; } = 10;
-        public int WindowMinutes { get; set; } = 30;
+        public int MaxTrades { get; set; } = 5;
+        public int WindowMinutes { get; set; } = 10;
 
         public TradeFrequencyRule()
         {
             Name = "Trade Frequency";
-            Description = "Limits trades within a rolling time window";
+            Description = "Lockout if too many trades in rolling window";
             Action = RuleAction.Lockout;
             LockoutType = LockoutDuration.Timed;
-            LockoutMinutes = 5;  // Default 5 min cooldown
+            LockoutMinutes = 30;  // Default 30 min lockout
         }
 
         public override bool IsViolated(RiskContext context)
@@ -35,13 +36,14 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         public override string GetViolationMessage(RiskContext context)
         {
             int count = context.GetTradeCountInWindow(WindowMinutes);
-            return $"Trade frequency exceeded: {count}/{MaxTrades} trades in {WindowMinutes} minutes";
+            return $"TRADE FREQUENCY LIMIT: {count} trades in {WindowMinutes} min (max: {MaxTrades}). " +
+                   $"LOCKED OUT for {LockoutMinutes} minutes.";
         }
 
         public override string GetStatusText(RiskContext context)
         {
             int count = context.GetTradeCountInWindow(WindowMinutes);
-            return $"{count}/{MaxTrades} trades in {WindowMinutes}m";
+            return $"{count}/{MaxTrades} trades in {WindowMinutes}m window";
         }
     }
 }

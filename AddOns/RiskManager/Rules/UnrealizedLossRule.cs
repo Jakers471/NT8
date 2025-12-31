@@ -1,21 +1,20 @@
 // UnrealizedLossRule.cs
-// Triggers FLATTEN when floating (unrealized) loss exceeds limit
-// NO LOCKOUT - just closes position to stop the bleeding
-// Can trade again immediately after position is closed
+// PER-POSITION floating loss limit - flatten ONLY that position
+// NO LOCKOUT - just closes the losing position
 
 #region Using declarations
 using System;
+using System.Linq;
 #endregion
 
 namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 {
     /// <summary>
-    /// Unrealized (Floating) Loss Rule
-    /// - Only looks at OPEN POSITION P&L
-    /// - Does NOT include realized (closed) P&L
-    /// - Causes FLATTEN only - NO lockout
-    /// - Can trade again immediately after flatten
-    /// - Use this as a "position stop loss" across all positions
+    /// Unrealized (Floating) Loss Rule - PER POSITION
+    /// - Checks EACH position's unrealized P&L individually
+    /// - Flattens ONLY the violating position (not all)
+    /// - NO lockout - can trade again immediately
+    /// - Use this as a per-position stop loss
     /// </summary>
     public class UnrealizedLossRule : RiskRule
     {
@@ -23,27 +22,39 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
         public UnrealizedLossRule()
         {
-            Name = "Unrealized Loss";
-            Description = "Flattens when floating loss exceeds limit (no lockout)";
-            Action = RuleAction.FlattenOnly; // NOT Lockout!
-            ResetSchedule = ResetSchedule.Never; // Always active, no reset needed
+            Name = "Unrealized Loss (Per Position)";
+            Description = "Flattens position when its floating loss exceeds limit";
+            Action = RuleAction.FlattenPosition; // Flatten SINGLE position only
+            ResetSchedule = ResetSchedule.Never;
         }
 
         public override bool IsViolated(RiskContext context)
         {
-            // ONLY check unrealized P&L (open positions)
-            // Realized (closed) P&L is NOT included
-            return context.UnrealizedPnL <= -MaxLoss;
+            if (context.OpenPositions == null) return false;
+
+            // Check each position's unrealized P&L
+            foreach (var pos in context.OpenPositions.Values)
+            {
+                if (pos.UnrealizedPnL <= -MaxLoss)
+                {
+                    context.ViolatingInstrument = pos.Instrument;
+                    context.ViolatingPositionPnL = pos.UnrealizedPnL;
+                    return true;
+                }
+            }
+            return false;
         }
 
         public override string GetViolationMessage(RiskContext context)
         {
-            return $"Floating loss limit: ${Math.Abs(context.UnrealizedPnL):F2} / ${MaxLoss:F2} - FLATTENING";
+            var instrument = context.ViolatingInstrument ?? "Unknown";
+            var pnl = context.ViolatingPositionPnL;
+            return $"Position loss limit: {instrument} at ${pnl:F2} (max: -${MaxLoss:F2})";
         }
 
         public override string GetStatusText(RiskContext context)
         {
-            return $"Floating: ${context.UnrealizedPnL:F2}";
+            return $"Max loss per position: -${MaxLoss:F2}";
         }
     }
 }

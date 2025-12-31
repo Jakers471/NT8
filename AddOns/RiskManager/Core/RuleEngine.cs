@@ -65,8 +65,15 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                                 Rule = rule,
                                 Action = rule.Action,
                                 Message = rule.GetViolationMessage(context),
-                                Timestamp = DateTime.Now
+                                Timestamp = DateTime.Now,
+                                Instrument = context.ViolatingInstrument
                             });
+
+                            // Capture violating instrument for per-position rules
+                            if (!string.IsNullOrEmpty(context.ViolatingInstrument))
+                            {
+                                result.ViolatingInstrument = context.ViolatingInstrument;
+                            }
                         }
                     }
                     catch (Exception ex)
@@ -99,6 +106,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         public List<RuleViolation> Violations { get; } = new List<RuleViolation>();
         public RuleAction RequiredAction { get; set; } = RuleAction.None;
         public bool HasViolations => Violations.Count > 0;
+
+        // For per-position rules - which instrument violated
+        public string ViolatingInstrument { get; set; }
     }
 
     /// <summary>
@@ -110,5 +120,6 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         public RuleAction Action { get; set; }
         public string Message { get; set; }
         public DateTime Timestamp { get; set; }
+        public string Instrument { get; set; } // For per-position rules
     }
 }

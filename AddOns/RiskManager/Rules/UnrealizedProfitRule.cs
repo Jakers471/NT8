@@ -1,20 +1,20 @@
 // UnrealizedProfitRule.cs
-// Triggers FLATTEN when floating (unrealized) profit exceeds target
-// NO LOCKOUT - just closes position to lock in gains
-// Can trade again immediately after position is closed
+// PER-POSITION take profit - flatten ONLY that position
+// NO LOCKOUT - just locks in the profit
 
 #region Using declarations
 using System;
+using System.Linq;
 #endregion
 
 namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 {
     /// <summary>
-    /// Unrealized (Floating) Profit Rule
-    /// - Only looks at OPEN POSITION P&L
-    /// - Causes FLATTEN only - NO lockout
-    /// - Can trade again immediately after flatten
-    /// - Use this as a "take profit" across all positions
+    /// Unrealized (Floating) Profit Rule - PER POSITION
+    /// - Checks EACH position's unrealized P&L individually
+    /// - Flattens ONLY the profitable position (not all)
+    /// - NO lockout - can trade again immediately
+    /// - Use this as a per-position take profit
     /// </summary>
     public class UnrealizedProfitRule : RiskRule
     {
@@ -22,26 +22,39 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
         public UnrealizedProfitRule()
         {
-            Name = "Unrealized Profit";
-            Description = "Flattens when floating profit hits target (no lockout)";
-            Action = RuleAction.FlattenOnly; // NOT Lockout!
-            ResetSchedule = ResetSchedule.Never; // Always active, no reset needed
+            Name = "Take Profit (Per Position)";
+            Description = "Flattens position when its profit hits target";
+            Action = RuleAction.FlattenPosition; // Flatten SINGLE position only
+            ResetSchedule = ResetSchedule.Never;
         }
 
         public override bool IsViolated(RiskContext context)
         {
-            // ONLY check unrealized P&L (open positions)
-            return context.UnrealizedPnL >= ProfitTarget;
+            if (context.OpenPositions == null) return false;
+
+            // Check each position's unrealized P&L
+            foreach (var pos in context.OpenPositions.Values)
+            {
+                if (pos.UnrealizedPnL >= ProfitTarget)
+                {
+                    context.ViolatingInstrument = pos.Instrument;
+                    context.ViolatingPositionPnL = pos.UnrealizedPnL;
+                    return true;
+                }
+            }
+            return false;
         }
 
         public override string GetViolationMessage(RiskContext context)
         {
-            return $"Floating profit target: ${context.UnrealizedPnL:F2} / ${ProfitTarget:F2} - TAKING PROFIT";
+            var instrument = context.ViolatingInstrument ?? "Unknown";
+            var pnl = context.ViolatingPositionPnL;
+            return $"Take profit hit: {instrument} at +${pnl:F2} (target: +${ProfitTarget:F2})";
         }
 
         public override string GetStatusText(RiskContext context)
         {
-            return $"Floating: ${context.UnrealizedPnL:F2}";
+            return $"Take profit per position: +${ProfitTarget:F2}";
         }
     }
 }

@@ -155,6 +155,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             state.TotalPnL = state.RealizedPnL + state.UnrealizedPnL;
             state.LastUpdated = DateTime.Now;
 
+            // Refresh per-position P&L data
+            RefreshPositionPnL(e.Account, state);
+
             // THROTTLED LOGGING - only log if:
             // 1. Enough time has passed (3 seconds), OR
             // 2. P&L changed significantly ($10+)
@@ -198,20 +201,20 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             }
 
             // ═══════════════════════════════════════════════════════════════
-            // LOCKOUT ORDER HANDLING - Critical fix!
+            // LOCKOUT ORDER HANDLING
+            // ALWAYS allow closing orders, ALWAYS block opening orders
             // ═══════════════════════════════════════════════════════════════
-            if (_actionHandler.IsLockedOut(e.Order.Account) &&
-                e.Order.OrderState == OrderState.Submitted)
+            if (e.Order.OrderState == OrderState.Submitted)
             {
-                // CHECK: Is this order CLOSING a position? If so, ALLOW it!
+                // First check: Is this a closing order? ALWAYS ALLOW regardless of lockout
                 if (IsClosingOrder(e.Order, state))
                 {
-                    Log($"ALLOWED: Closing order permitted during lockout");
+                    Log($"ALLOWED: Closing order permitted");
                     // Don't block - let it through
                 }
-                else
+                else if (_actionHandler.IsLockedOut(e.Order.Account))
                 {
-                    // This order would OPEN or INCREASE a position - BLOCK IT
+                    // This order would OPEN or INCREASE a position during lockout - BLOCK IT
                     Log($"BLOCKED: Order would open/increase position during lockout");
                     _actionHandler.CancelOrder(e.Order);
                     return;
@@ -234,24 +237,29 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
             Log($"Position: {e.Position.Instrument.FullName} {e.Position.MarketPosition} {e.Position.Quantity}");
 
-            // Update position tracking
+            // Update position tracking in state
             state.UpdatePosition(e.Position);
 
-            // ═══════════════════════════════════════════════════════════════
-            // FIX: Don't repeatedly flatten!
-            // The initial lockout already called Flatten once.
-            // We just skip further rule evaluation while locked out.
-            // ═══════════════════════════════════════════════════════════════
-            if (_actionHandler.IsLockedOut(e.Position.Account))
+            // Track trade state for duplicate action prevention
+            if (e.Position.MarketPosition == MarketPosition.Flat)
             {
-                // Position is updating (probably from our flatten order)
-                // Just wait for it to go flat, don't call flatten again
-                if (e.Position.MarketPosition == MarketPosition.Flat)
+                // Position closed - update trade tracker
+                _actionHandler.OnPositionClosed(e.Position.Account, e.Position.Instrument);
+
+                if (_actionHandler.IsLockedOut(e.Position.Account))
                 {
                     Log($"Position closed successfully during lockout");
                 }
-                return;
             }
+            else
+            {
+                // Position opened/changed - track it
+                _actionHandler.OnPositionOpened(e.Position.Account, e.Position.Instrument);
+            }
+
+            // Skip rule evaluation if locked out
+            if (_actionHandler.IsLockedOut(e.Position.Account))
+                return;
 
             EvaluateRules(e.Position.Account, state, TriggerType.PositionUpdate);
         }
@@ -292,24 +300,29 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
         private bool IsClosingOrder(Order order, AccountState state)
         {
-            var instrument = order.Instrument.FullName;
+            // Check REAL account positions, not our tracked state
+            var account = order.Account;
+            var instrument = order.Instrument;
 
-            // If no position in this instrument, any order would OPEN a position
-            if (!state.Positions.TryGetValue(instrument, out var position))
+            // Find actual position from account
+            var realPosition = account.Positions.FirstOrDefault(p => p.Instrument == instrument);
+
+            // If no real position, this order would OPEN - not closing
+            if (realPosition == null || realPosition.MarketPosition == MarketPosition.Flat)
                 return false;
 
             // Check if order direction is opposite to position direction
-            // LONG position + SELL/SellShort = CLOSING
-            // SHORT position + BUY/BuyToCover = CLOSING
+            // LONG position + SELL = CLOSING
+            // SHORT position + BUY = CLOSING
 
-            if (position.Direction == MarketPosition.Long)
+            if (realPosition.MarketPosition == MarketPosition.Long)
             {
                 // Selling when long = closing
                 return order.OrderAction == OrderAction.Sell ||
                        order.OrderAction == OrderAction.SellShort;
             }
 
-            if (position.Direction == MarketPosition.Short)
+            if (realPosition.MarketPosition == MarketPosition.Short)
             {
                 // Buying when short = closing
                 return order.OrderAction == OrderAction.Buy ||
@@ -327,8 +340,12 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         {
             try
             {
-                // Skip if already locked out (prevent spam)
-                if (_actionHandler.IsLockedOut(account))
+                // FAST PATH: Skip if locked out (O(1) lookup)
+                if (RiskState.Instance.IsLocked(account.Name))
+                    return;
+
+                // FAST PATH: Skip if in cooldown
+                if (!RiskState.Instance.CanTakeAction(account.Name))
                     return;
 
                 // Build context if not provided
@@ -390,11 +407,37 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         /// </summary>
         public void ResetAllBaselines()
         {
+            Log($"ResetAllBaselines called - {_accountStates.Count} accounts tracked");
+            if (_accountStates.Count == 0)
+            {
+                Log("WARNING: No accounts being tracked! Baseline reset failed.");
+                return;
+            }
             foreach (var state in _accountStates.Values)
             {
+                var oldBaseline = state.RealizedPnLBaseline;
                 state.ResetBaseline();
-                Log($"P&L baseline reset for {state.Account.Name}. New baseline: ${state.RealizedPnLBaseline:F2}");
+                Log($"P&L baseline reset for {state.Account.Name}: ${oldBaseline:F2} -> ${state.RealizedPnLBaseline:F2}");
+                Log($"  Adjusted P&L now: ${state.AdjustedTotalPnL:F2} (was ${state.TotalPnL - oldBaseline:F2})");
             }
+        }
+
+        private void RefreshPositionPnL(Account account, AccountState state)
+        {
+            try
+            {
+                foreach (var pos in account.Positions)
+                {
+                    if (pos.MarketPosition == MarketPosition.Flat) continue;
+
+                    var key = pos.Instrument.FullName;
+                    if (state.Positions.TryGetValue(key, out var posInfo))
+                    {
+                        posInfo.UnrealizedPnL = pos.GetUnrealizedProfitLoss(NinjaTrader.Cbi.PerformanceUnit.Currency);
+                    }
+                }
+            }
+            catch { }
         }
 
         private double GetCurrentBalance(Account account)
@@ -452,12 +495,21 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             }
             else
             {
+                // Get per-position unrealized P&L
+                double positionPnL = 0;
+                try
+                {
+                    positionPnL = position.GetUnrealizedProfitLoss(NinjaTrader.Cbi.PerformanceUnit.Currency);
+                }
+                catch { }
+
                 Positions[key] = new PositionInfo
                 {
                     Instrument = key,
                     Direction = position.MarketPosition,
                     Quantity = position.Quantity,
-                    AvgPrice = position.AveragePrice
+                    AvgPrice = position.AveragePrice,
+                    UnrealizedPnL = positionPnL
                 };
             }
         }
@@ -469,6 +521,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         public MarketPosition Direction { get; set; }
         public int Quantity { get; set; }
         public double AvgPrice { get; set; }
+        public double UnrealizedPnL { get; set; }
     }
 
     public class TradeRecord

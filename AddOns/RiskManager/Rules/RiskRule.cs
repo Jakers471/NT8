@@ -16,8 +16,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         None = 0,           // Just log, no action
         Alert = 1,          // Show alert, continue trading
         BlockOrder = 2,     // Block the specific order only
-        FlattenOnly = 3,    // Flatten positions but NO lockout - can trade again
-        Lockout = 4         // Full lockout - flatten + block all new positions
+        FlattenPosition = 3,// Flatten SINGLE position only (per-position rules)
+        FlattenOnly = 4,    // Flatten ALL positions but NO lockout - can trade again
+        Lockout = 5         // Full lockout - flatten + block all new positions
     }
 
     /// <summary>

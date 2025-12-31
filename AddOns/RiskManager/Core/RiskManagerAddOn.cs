@@ -65,16 +65,20 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     var config = StateManager.LoadConfig();
                     Log($"Configuration loaded from disk");
 
+                    // Load closure history
+                    StateManager.LoadClosureHistory();
+
                     // Create core components
                     _ruleEngine = new RuleEngine();
                     _actionHandler = new ActionHandler(); // Loads persisted lockouts automatically
                     _accountMonitor = new AccountMonitor(_ruleEngine, _actionHandler);
 
                     // ═══════════════════════════════════════════════════════════
-                    // CONFIGURE RULES FROM SAVED CONFIG
+                    // ACCOUNT-WIDE RULES (Lockout + Flatten ALL)
                     // ═══════════════════════════════════════════════════════════
+                    Log("ACCOUNT RULES:");
 
-                    // RULE 1: Total Daily Loss (Realized + Unrealized) → LOCKOUT
+                    // Total Daily Loss → LOCKOUT
                     if (config.TotalLossEnabled)
                     {
                         _ruleEngine.AddRule(new MaxLossRule
@@ -91,44 +95,10 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     }
                     else
                     {
-                        Log($"  [OFF] Total Daily Loss: disabled");
+                        Log($"  [OFF] Total Daily Loss");
                     }
 
-                    // RULE 2: Unrealized Loss (Floating P&L) → FLATTEN ONLY
-                    if (config.FloatingStopEnabled)
-                    {
-                        _ruleEngine.AddRule(new UnrealizedLossRule
-                        {
-                            Name = "Floating Stop Loss",
-                            Enabled = true,
-                            MaxLoss = config.FloatingStopMax,
-                            Action = RuleAction.FlattenOnly
-                        });
-                        Log($"  [ON]  Floating Stop Loss: ${config.FloatingStopMax} → FLATTEN");
-                    }
-                    else
-                    {
-                        Log($"  [OFF] Floating Stop Loss: disabled");
-                    }
-
-                    // RULE 3: Unrealized Profit (Floating P&L) → FLATTEN ONLY
-                    if (config.TakeProfitEnabled)
-                    {
-                        _ruleEngine.AddRule(new UnrealizedProfitRule
-                        {
-                            Name = "Floating Take Profit",
-                            Enabled = true,
-                            ProfitTarget = config.TakeProfitTarget,
-                            Action = RuleAction.FlattenOnly
-                        });
-                        Log($"  [ON]  Take Profit: ${config.TakeProfitTarget} → FLATTEN");
-                    }
-                    else
-                    {
-                        Log($"  [OFF] Take Profit: disabled");
-                    }
-
-                    // RULE 4: Daily Realized Loss → LOCKOUT (optional)
+                    // Daily Realized Loss → LOCKOUT
                     if (config.RealizedLossEnabled)
                     {
                         _ruleEngine.AddRule(new DailyRealizedLossRule
@@ -141,11 +111,139 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                             ResetSchedule = ResetSchedule.Daily,
                             DailyResetTime = new TimeSpan(config.RealizedLossResetHour, 0, 0)
                         });
-                        Log($"  [ON]  Realized Loss: ${config.RealizedLossMax} → LOCKOUT");
+                        Log($"  [ON]  Realized Loss Only: ${config.RealizedLossMax} → LOCKOUT");
                     }
                     else
                     {
-                        Log($"  [OFF] Realized Loss: disabled");
+                        Log($"  [OFF] Realized Loss Only");
+                    }
+
+                    // Daily Profit Target → LOCKOUT
+                    if (config.DailyProfitEnabled)
+                    {
+                        _ruleEngine.AddRule(new DailyRealizedProfitRule
+                        {
+                            Name = "Daily Profit Target",
+                            Enabled = true,
+                            ProfitTarget = config.DailyProfitTarget,
+                            Action = RuleAction.Lockout,
+                            LockoutType = LockoutDuration.UntilReset,
+                            ResetSchedule = ResetSchedule.Daily,
+                            DailyResetTime = new TimeSpan(config.DailyProfitResetHour, 0, 0)
+                        });
+                        Log($"  [ON]  Daily Profit Target: ${config.DailyProfitTarget} → LOCKOUT");
+                    }
+                    else
+                    {
+                        Log($"  [OFF] Daily Profit Target");
+                    }
+
+                    // ═══════════════════════════════════════════════════════════
+                    // PER-POSITION RULES (Flatten single position only)
+                    // ═══════════════════════════════════════════════════════════
+                    Log("POSITION RULES:");
+
+                    // Position Stop Loss → Flatten position
+                    if (config.PositionStopEnabled)
+                    {
+                        _ruleEngine.AddRule(new UnrealizedLossRule
+                        {
+                            Name = "Position Stop Loss",
+                            Enabled = true,
+                            MaxLoss = config.PositionStopMax,
+                            Action = RuleAction.FlattenPosition
+                        });
+                        Log($"  [ON]  Position Stop: ${config.PositionStopMax} → FLATTEN POSITION");
+                    }
+                    else
+                    {
+                        Log($"  [OFF] Position Stop");
+                    }
+
+                    // Position Take Profit → Flatten position
+                    if (config.PositionTargetEnabled)
+                    {
+                        _ruleEngine.AddRule(new UnrealizedProfitRule
+                        {
+                            Name = "Position Take Profit",
+                            Enabled = true,
+                            ProfitTarget = config.PositionTargetAmount,
+                            Action = RuleAction.FlattenPosition
+                        });
+                        Log($"  [ON]  Position Target: ${config.PositionTargetAmount} → FLATTEN POSITION");
+                    }
+                    else
+                    {
+                        Log($"  [OFF] Position Target");
+                    }
+
+                    // Max Position Size → Flatten position (per symbol)
+                    if (config.MaxPositionSizeEnabled)
+                    {
+                        var sizeRule = new MaxPositionSizeRule
+                        {
+                            Name = "Max Position Size",
+                            Enabled = true,
+                            DefaultMax = config.MaxPositionSizeDefault,
+                            PerSymbolConfig = config.MaxPositionSizePerSymbol,
+                            Action = RuleAction.FlattenPosition
+                        };
+                        sizeRule.ParseConfig();
+                        _ruleEngine.AddRule(sizeRule);
+                        Log($"  [ON]  Max Position Size: Default={config.MaxPositionSizeDefault}, Per-symbol={config.MaxPositionSizePerSymbol} → FLATTEN POSITION");
+                    }
+                    else
+                    {
+                        Log($"  [OFF] Max Position Size");
+                    }
+
+                    // ═══════════════════════════════════════════════════════════
+                    // TRADE FREQUENCY RULE (Timed Lockout)
+                    // ═══════════════════════════════════════════════════════════
+                    Log("FREQUENCY RULES:");
+
+                    // Trade Frequency → Timed lockout
+                    if (config.TradeFrequencyEnabled)
+                    {
+                        _ruleEngine.AddRule(new TradeFrequencyRule
+                        {
+                            Name = "Trade Frequency",
+                            Enabled = true,
+                            MaxTrades = config.TradeFrequencyMaxTrades,
+                            WindowMinutes = config.TradeFrequencyWindowMinutes,
+                            LockoutMinutes = config.TradeFrequencyLockoutMinutes,
+                            Action = RuleAction.Lockout,
+                            LockoutType = LockoutDuration.Timed
+                        });
+                        Log($"  [ON]  Trade Frequency: {config.TradeFrequencyMaxTrades} trades/{config.TradeFrequencyWindowMinutes}min → {config.TradeFrequencyLockoutMinutes}min LOCKOUT");
+                    }
+                    else
+                    {
+                        Log($"  [OFF] Trade Frequency");
+                    }
+
+                    // ═══════════════════════════════════════════════════════════
+                    // SYMBOL BLOCK LIST (Flatten blocked positions)
+                    // ═══════════════════════════════════════════════════════════
+                    Log("SYMBOL RULES:");
+
+                    // Symbol Block → Flatten position
+                    if (config.SymbolBlockEnabled && !string.IsNullOrWhiteSpace(config.SymbolBlockList))
+                    {
+                        var blockRule = new SymbolBlockRule
+                        {
+                            Name = "Symbol Block",
+                            Enabled = true,
+                            BlockListConfig = config.SymbolBlockList,
+                            Action = RuleAction.FlattenPosition
+                        };
+                        blockRule.ParseConfig();
+                        _ruleEngine.AddRule(blockRule);
+                        Log($"  [ON]  Symbol Block: {config.SymbolBlockList} → FLATTEN POSITION");
+                    }
+                    else
+                    {
+                        Log($"  [OFF] Symbol Block");
                     }
 
                     Log("───────────────────────────────────────────────────────");
@@ -225,6 +323,42 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     riskMenuItem.Click += OnRiskManagerMenuClick;
                     menu.Items.Add(riskMenuItem);
                     _menuItemAdded = true;
+
+                    // Auto-open windows at startup
+                    controlCenter.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try
+                        {
+                            // Find and click menu items to open windows
+                            var newMenu = controlCenter.FindFirst("ControlCenterMenuItemNew") as NTMenuItem;
+                            if (newMenu != null)
+                            {
+                                foreach (var item in newMenu.Items)
+                                {
+                                    if (item is NTMenuItem mi)
+                                    {
+                                        var header = mi.Header?.ToString() ?? "";
+                                        if (header == "NinjaScript Output" ||
+                                            header == "NinjaScript Editor" ||
+                                            header == "Basic Entry")
+                                        {
+                                            mi.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Open Risk Manager window
+                            var riskWindow = new RiskManagerWindow(_accountMonitor, _actionHandler, _ruleEngine);
+                            riskWindow.Show();
+
+                            Log("Startup windows auto-opened");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"*** AUTO-OPEN ERROR: {ex.Message} ***");
+                        }
+                    }), System.Windows.Threading.DispatcherPriority.Loaded);
                 }
             }
         }
