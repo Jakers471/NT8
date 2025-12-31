@@ -1,0 +1,27 @@
+# Build artifacts
+*.dll
+*.pdb
+*.xml
+bin/
+obj/
+
+# Visual Studio
+.vs/
+
+# Language folders (auto-generated)
+de-DE/
+es-ES/
+fr-FR/
+it-IT/
+ko-KR/
+pt-PT/
+ru-RU/
+zh-Hans/
+
+# Resource files (auto-generated)
+Resource.Designer.cs
+Resource*.resx
+
+# NinjaTrader generated
+NinjaTrader.Vendor.cs
+ExportNinjaScript/
