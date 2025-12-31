@@ -178,27 +178,59 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             };
             panel.Children.Add(_riskDisplay);
 
-            // Place OCO Button
-            var placeBtn = new Button
+            // Buy/Sell buttons for NEW positions
+            var entryButtonPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 5, 0, 5) };
+
+            var buyBtn = new Button
             {
-                Content = "Place OCO Orders on Current Position",
-                Height = 35,
+                Content = "BUY",
+                Width = 100,
+                Height = 40,
                 FontWeight = FontWeights.Bold,
-                Background = new SolidColorBrush(Color.FromRgb(0, 100, 150)),
+                FontSize = 14,
+                Background = new SolidColorBrush(Color.FromRgb(0, 120, 0)),
                 Foreground = Brushes.White,
-                Margin = new Thickness(0, 5, 0, 0)
+                Margin = new Thickness(0, 0, 10, 0)
             };
-            placeBtn.Click += OnPlaceOcoClick;
-            panel.Children.Add(placeBtn);
+            buyBtn.Click += OnBuyClick;
+            entryButtonPanel.Children.Add(buyBtn);
+
+            var sellBtn = new Button
+            {
+                Content = "SELL",
+                Width = 100,
+                Height = 40,
+                FontWeight = FontWeights.Bold,
+                FontSize = 14,
+                Background = new SolidColorBrush(Color.FromRgb(150, 0, 0)),
+                Foreground = Brushes.White
+            };
+            sellBtn.Click += OnSellClick;
+            entryButtonPanel.Children.Add(sellBtn);
+
+            panel.Children.Add(entryButtonPanel);
 
             panel.Children.Add(new TextBlock
             {
-                Text = "Applies to EXISTING position in selected symbol",
+                Text = "Enters position with Stop + Target attached (OCO)",
                 FontSize = 10,
                 Foreground = Brushes.Gray,
                 FontStyle = FontStyles.Italic,
                 Margin = new Thickness(0, 3, 0, 0)
             });
+
+            // Add OCO to existing position button
+            var addOcoBtn = new Button
+            {
+                Content = "Add OCO to Existing Position",
+                Height = 28,
+                FontSize = 11,
+                Background = new SolidColorBrush(Color.FromRgb(60, 60, 100)),
+                Foreground = Brushes.White,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            addOcoBtn.Click += OnPlaceOcoClick;
+            panel.Children.Add(addOcoBtn);
 
             border.Child = panel;
             return border;
@@ -347,6 +379,72 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             }
         }
 
+        private void OnBuyClick(object sender, RoutedEventArgs e)
+        {
+            PlaceEntryWithOco(true);
+        }
+
+        private void OnSellClick(object sender, RoutedEventArgs e)
+        {
+            PlaceEntryWithOco(false);
+        }
+
+        private void PlaceEntryWithOco(bool isLong)
+        {
+            if (_selectedAccount == null)
+            {
+                MessageBox.Show("Select an account first", "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var symbolName = _symbolCombo.SelectedItem?.ToString();
+            if (string.IsNullOrEmpty(symbolName))
+            {
+                MessageBox.Show("Select a symbol first", "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (!int.TryParse(_quantityBox.Text, out int quantity) || quantity <= 0)
+            {
+                MessageBox.Show("Invalid quantity", "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Validate position size
+            var validation = _handler.ValidatePositionSize(symbolName, quantity);
+            if (!validation.IsValid)
+            {
+                var proceed = MessageBox.Show(
+                    $"{validation.Message}\n\nProceed anyway?",
+                    "Size Warning",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+                if (proceed != MessageBoxResult.Yes) return;
+            }
+
+            if (!double.TryParse(_stopLossBox.Text, out double stopDollars) || stopDollars <= 0)
+            {
+                MessageBox.Show("Invalid stop loss amount", "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            double.TryParse(_takeProfitBox.Text, out double tpDollars);
+
+            // Place bracket order (entry + OCO)
+            var success = _handler.PlaceBracketOrder(
+                _selectedAccount,
+                symbolName,
+                quantity,
+                isLong,
+                stopDollars,
+                tpDollars > 0 ? tpDollars : (double?)null);
+
+            if (!success)
+            {
+                MessageBox.Show("Failed to place order. Check output log.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         private void OnPlaceOcoClick(object sender, RoutedEventArgs e)
         {
             if (_selectedAccount == null)
@@ -457,7 +555,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             }
         }
 
-        private Border CreatePositionRow(PositionInfo position)
+        private Border CreatePositionRow(PositionData position)
         {
             var border = new Border
             {
@@ -557,7 +655,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         private void OnBreakEvenClick(object sender, RoutedEventArgs e)
         {
             var button = sender as Button;
-            var position = button?.Tag as PositionInfo;
+            var position = button?.Tag as PositionData;
 
             if (position != null && _selectedAccount != null)
             {
@@ -580,7 +678,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         private void OnClosePositionClick(object sender, RoutedEventArgs e)
         {
             var button = sender as Button;
-            var position = button?.Tag as PositionInfo;
+            var position = button?.Tag as PositionData;
 
             if (position != null && _selectedAccount != null)
             {

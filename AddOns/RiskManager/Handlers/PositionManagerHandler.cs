@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Linq;
 using NinjaTrader.Cbi;
 using NinjaTrader.Code;
+using NinjaTrader.Core;
 #endregion
 
 namespace NinjaTrader.NinjaScript.AddOns.RiskManager
@@ -35,9 +36,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         /// <summary>
         /// Get all active positions for an account
         /// </summary>
-        public List<PositionInfo> GetActivePositions(Account account)
+        public List<PositionData> GetActivePositions(Account account)
         {
-            var positions = new List<PositionInfo>();
+            var positions = new List<PositionData>();
             if (account == null) return positions;
 
             try
@@ -46,7 +47,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                 {
                     if (pos.MarketPosition != MarketPosition.Flat)
                     {
-                        positions.Add(new PositionInfo
+                        positions.Add(new PositionData
                         {
                             Instrument = pos.Instrument.FullName,
                             InstrumentObj = pos.Instrument,
@@ -95,11 +96,14 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                             instrument,
                             stopAction,
                             OrderType.StopMarket,
+                            OrderEntry.Manual,
+                            TimeInForce.Gtc,
                             quantity,
                             0,              // limit price (not used)
                             stopPrice.Value,
                             ocoId,
                             "PM_Stop",
+                            Globals.MaxDate,
                             null
                         );
                         orders.Add(stopOrder);
@@ -113,11 +117,14 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                             instrument,
                             tpAction,
                             OrderType.Limit,
+                            OrderEntry.Manual,
+                            TimeInForce.Gtc,
                             quantity,
                             targetPrice.Value,
                             0,              // stop price (not used)
                             ocoId,
                             "PM_Target",
+                            Globals.MaxDate,
                             null
                         );
                         orders.Add(tpOrder);
@@ -185,12 +192,170 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
         #endregion
 
+        #region Bracket Order (Entry + OCO)
+
+        /// <summary>
+        /// Place a bracket order: Market entry + OCO (stop + target)
+        /// </summary>
+        public bool PlaceBracketOrder(Account account, string symbolName, int quantity,
+            bool isLong, double stopDollars, double? targetDollars)
+        {
+            if (account == null || string.IsNullOrEmpty(symbolName)) return false;
+
+            try
+            {
+                lock (_lock)
+                {
+                    // Resolve instrument
+                    var instrument = ResolveInstrument(symbolName);
+                    if (instrument == null)
+                    {
+                        Log($"Could not resolve instrument: {symbolName}");
+                        return false;
+                    }
+
+                    // Get current price for stop/target calculation
+                    double currentPrice = instrument.MarketData.Last.Price;
+                    if (currentPrice <= 0)
+                    {
+                        currentPrice = instrument.MarketData.Bid.Price;
+                    }
+                    if (currentPrice <= 0)
+                    {
+                        Log($"No price data for {symbolName}");
+                        return false;
+                    }
+
+                    // Calculate stop and target prices
+                    double tickSize = instrument.MasterInstrument.TickSize;
+                    double tickValue = instrument.MasterInstrument.PointValue * tickSize;
+
+                    double stopTicks = stopDollars / (tickValue * quantity);
+                    double stopDistance = stopTicks * tickSize;
+
+                    double stopPrice = isLong ? currentPrice - stopDistance : currentPrice + stopDistance;
+                    stopPrice = RoundToTick(stopPrice, tickSize);
+
+                    double? targetPrice = null;
+                    if (targetDollars.HasValue && targetDollars.Value > 0)
+                    {
+                        double targetTicks = targetDollars.Value / (tickValue * quantity);
+                        double targetDistance = targetTicks * tickSize;
+                        targetPrice = isLong ? currentPrice + targetDistance : currentPrice - targetDistance;
+                        targetPrice = RoundToTick(targetPrice.Value, tickSize);
+                    }
+
+                    string ocoId = $"PM_{symbolName}_{DateTime.Now.Ticks}";
+
+                    // Entry order
+                    var entryAction = isLong ? OrderAction.Buy : OrderAction.SellShort;
+                    var entryOrder = account.CreateOrder(
+                        instrument,
+                        entryAction,
+                        OrderType.Market,
+                        OrderEntry.Manual,
+                        TimeInForce.Gtc,
+                        quantity,
+                        0, 0, "", "PM_Entry",
+                        Globals.MaxDate,
+                        null
+                    );
+
+                    // Stop order
+                    var stopAction = isLong ? OrderAction.Sell : OrderAction.BuyToCover;
+                    var stopOrder = account.CreateOrder(
+                        instrument,
+                        stopAction,
+                        OrderType.StopMarket,
+                        OrderEntry.Manual,
+                        TimeInForce.Gtc,
+                        quantity,
+                        0,
+                        stopPrice,
+                        ocoId,
+                        "PM_Stop",
+                        Globals.MaxDate,
+                        null
+                    );
+
+                    var orders = new List<Order> { entryOrder, stopOrder };
+
+                    // Target order (if specified)
+                    if (targetPrice.HasValue)
+                    {
+                        var tpOrder = account.CreateOrder(
+                            instrument,
+                            stopAction,
+                            OrderType.Limit,
+                            OrderEntry.Manual,
+                            TimeInForce.Gtc,
+                            quantity,
+                            targetPrice.Value,
+                            0,
+                            ocoId,
+                            "PM_Target",
+                            Globals.MaxDate,
+                            null
+                        );
+                        orders.Add(tpOrder);
+                    }
+
+                    // Submit all orders
+                    account.Submit(orders.ToArray());
+
+                    Log($"Bracket order placed: {(isLong ? "BUY" : "SELL")} {quantity} {symbolName} @ Market, Stop={stopPrice:F2}, Target={targetPrice:F2}");
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error placing bracket order: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        private Instrument ResolveInstrument(string symbolName)
+        {
+            try
+            {
+                // Try to find existing instrument
+                var instrument = Instrument.GetInstrument(symbolName);
+                if (instrument != null) return instrument;
+
+                // Try common futures formats
+                var root = symbolName.Split(' ')[0].ToUpper();
+
+                // Try to get front month contract
+                foreach (var inst in Instrument.All)
+                {
+                    if (inst.FullName.StartsWith(root + " ") || inst.FullName == root)
+                    {
+                        return inst;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error resolving instrument: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private double RoundToTick(double price, double tickSize)
+        {
+            return Math.Round(price / tickSize) * tickSize;
+        }
+
+        #endregion
+
         #region Break-Even
 
         /// <summary>
         /// Move stop to break-even (entry price) for a position
         /// </summary>
-        public bool MoveToBreakEven(Account account, PositionInfo position)
+        public bool MoveToBreakEven(Account account, PositionData position)
         {
             if (account == null || position == null) return false;
 
@@ -213,35 +378,32 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
                     double breakEvenPrice = position.AvgPrice;
 
+                    bool isLong = position.Direction == "Long";
+                    var stopAction = isLong ? OrderAction.Sell : OrderAction.BuyToCover;
+
                     if (existingStop != null)
                     {
-                        // Modify existing stop to break-even
-                        account.Change(new[] { existingStop },
-                            existingStop.Quantity,
-                            0, // limit price
-                            breakEvenPrice);
-                        Log($"Stop moved to BE for {position.Instrument} at {breakEvenPrice}");
+                        // Cancel existing stop first
+                        account.Cancel(new[] { existingStop });
                     }
-                    else
-                    {
-                        // No existing stop - create one at break-even
-                        bool isLong = position.Direction == "Long";
-                        var stopAction = isLong ? OrderAction.Sell : OrderAction.BuyToCover;
 
-                        var stopOrder = account.CreateOrder(
-                            position.InstrumentObj,
-                            stopAction,
-                            OrderType.StopMarket,
-                            position.Quantity,
-                            0,
-                            breakEvenPrice,
-                            "",
-                            "PM_BE_Stop",
-                            null
-                        );
-                        account.Submit(new[] { stopOrder });
-                        Log($"BE stop created for {position.Instrument} at {breakEvenPrice}");
-                    }
+                    // Create new stop at break-even
+                    var stopOrder = account.CreateOrder(
+                        position.InstrumentObj,
+                        stopAction,
+                        OrderType.StopMarket,
+                        OrderEntry.Manual,
+                        TimeInForce.Gtc,
+                        position.Quantity,
+                        0, // limit price
+                        breakEvenPrice, // stop price
+                        "",
+                        "PM_BE_Stop",
+                        Globals.MaxDate,
+                        null
+                    );
+                    account.Submit(new[] { stopOrder });
+                    Log($"BE stop set for {position.Instrument} at {breakEvenPrice}");
 
                     return true;
                 }
@@ -261,7 +423,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         /// <summary>
         /// Close a specific position immediately
         /// </summary>
-        public bool ClosePosition(Account account, PositionInfo position)
+        public bool ClosePosition(Account account, PositionData position)
         {
             if (account == null || position == null) return false;
 
@@ -280,8 +442,15 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                         position.InstrumentObj,
                         closeAction,
                         OrderType.Market,
+                        OrderEntry.Manual,
+                        TimeInForce.Gtc,
                         position.Quantity,
-                        0, 0, "", "PM_Close", null
+                        0, // limit price
+                        0, // stop price
+                        "",
+                        "PM_Close",
+                        Globals.MaxDate,
+                        null
                     );
                     account.Submit(new[] { closeOrder });
 
@@ -432,7 +601,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
     #region Supporting Classes
 
-    public class PositionInfo
+    public class PositionData
     {
         public string Instrument { get; set; }
         public Instrument InstrumentObj { get; set; }

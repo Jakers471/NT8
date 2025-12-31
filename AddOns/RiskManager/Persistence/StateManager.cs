@@ -186,6 +186,74 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         }
 
         // ═══════════════════════════════════════════════════════════════
+        // FILE LOGGING - For debugging errors
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Log an error to file for later analysis
+        /// </summary>
+        public static void LogError(string source, string message, Exception ex = null)
+        {
+            lock (_logLock)
+            {
+                try
+                {
+                    var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{source}] {message}";
+                    if (ex != null)
+                    {
+                        logEntry += $"\n  Exception: {ex.GetType().Name}: {ex.Message}";
+                        if (ex.StackTrace != null)
+                            logEntry += $"\n  Stack: {ex.StackTrace.Split('\n')[0]}";
+                    }
+                    logEntry += "\n";
+
+                    File.AppendAllText(ErrorLogFile, logEntry);
+
+                    // Also log to output
+                    Output.Process($"[RiskManager] *** ERROR: {message} ***", PrintTo.OutputTab1);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Log info to file
+        /// </summary>
+        public static void LogToFile(string source, string message)
+        {
+            lock (_logLock)
+            {
+                try
+                {
+                    var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{source}] {message}\n";
+                    File.AppendAllText(ErrorLogFile, logEntry);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Clear the error log file
+        /// </summary>
+        public static void ClearErrorLog()
+        {
+            lock (_logLock)
+            {
+                try
+                {
+                    if (File.Exists(ErrorLogFile))
+                        File.Delete(ErrorLogFile);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Get the error log file path
+        /// </summary>
+        public static string GetErrorLogPath() => ErrorLogFile;
+
+        // ═══════════════════════════════════════════════════════════════
         // CLOSURE HISTORY PERSISTENCE
         // ═══════════════════════════════════════════════════════════════
 

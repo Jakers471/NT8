@@ -623,6 +623,13 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         {
             // Prefix with *** for visibility
             Output.Process($"[RiskManager] {DateTime.Now:HH:mm:ss} *** {message} ***", PrintTo.OutputTab1);
+            // Also log to file
+            StateManager.LogToFile("ActionHandler", message);
+        }
+
+        private void LogException(string context, Exception ex)
+        {
+            StateManager.LogError("ActionHandler", $"{context}: {ex.Message}", ex);
         }
     }
 

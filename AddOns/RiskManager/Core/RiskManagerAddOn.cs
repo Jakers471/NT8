@@ -58,6 +58,11 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     // Clear output log for fresh start
                     Output.Reset(PrintTo.OutputTab1);
 
+                    // Log startup to file
+                    StateManager.LogToFile("AddOn", "═══════════════════════════════════════════════════════");
+                    StateManager.LogToFile("AddOn", "   RISK MANAGER STARTING");
+                    StateManager.LogToFile("AddOn", "═══════════════════════════════════════════════════════");
+
                     Log("═══════════════════════════════════════════════════════");
                     Log("   RISK MANAGER STARTING");
                     Log("═══════════════════════════════════════════════════════");
