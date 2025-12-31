@@ -255,6 +255,15 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             {
                 // Position opened/changed - track it
                 _actionHandler.OnPositionOpened(e.Position.Account, e.Position.Instrument);
+
+                // CRITICAL: If locked out and a position just opened, flatten it immediately
+                // This catches orders that filled at exchange before cancel arrived
+                if (_actionHandler.IsLockedOut(e.Position.Account))
+                {
+                    Log($"*** RACE CONDITION: Position opened during lockout - flattening immediately ***");
+                    _actionHandler.FlattenPosition(e.Position.Account, e.Position.Instrument.FullName);
+                    return;
+                }
             }
 
             // Skip rule evaluation if locked out

@@ -332,6 +332,24 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             // Execute lockout actions
             CancelAllOrders(account);
             FlattenAll(account);
+
+            // Re-check for positions that filled during lockout (race condition)
+            // Orders in flight at exchange may fill before cancel arrives
+            System.Threading.Tasks.Task.Delay(500).ContinueWith(_ =>
+            {
+                try
+                {
+                    var openPositions = account.Positions.Where(p => p.MarketPosition != MarketPosition.Flat).ToList();
+                    if (openPositions.Any())
+                    {
+                        LogWarning($"Race condition detected: {openPositions.Count} position(s) opened during lockout");
+                        CancelAllOrders(account);
+                        FlattenAll(account);
+                    }
+                }
+                catch { }
+            });
+
             ShowAlert(result, isLockout: true);
         }
 
