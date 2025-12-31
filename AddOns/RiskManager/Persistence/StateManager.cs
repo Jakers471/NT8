@@ -358,9 +358,20 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         public string RuleName { get; set; }
         public string Reason { get; set; }
         public string ActionType { get; set; }  // "FlattenPosition", "FlattenAll", "Lockout"
-        public double PnLAtClosure { get; set; }
+        public double PnLAtClosure { get; set; }      // Account total P&L
+        public double PositionPnL { get; set; }       // The closed position's P&L
 
         public string Summary => $"{Timestamp:HH:mm:ss} | {ActionType} | {Instrument ?? "ALL"} | {RuleName}";
+
+        public string PnLDisplay
+        {
+            get
+            {
+                if (ActionType == "FlattenPosition" && Instrument != null)
+                    return PositionPnL >= 0 ? $"+${PositionPnL:F2}" : $"-${Math.Abs(PositionPnL):F2}";
+                return PnLAtClosure >= 0 ? $"+${PnLAtClosure:F2}" : $"-${Math.Abs(PnLAtClosure):F2}";
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════

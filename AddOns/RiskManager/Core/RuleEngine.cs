@@ -69,10 +69,11 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                                 Instrument = context.ViolatingInstrument
                             });
 
-                            // Capture violating instrument for per-position rules
+                            // Capture violating instrument and P&L for per-position rules
                             if (!string.IsNullOrEmpty(context.ViolatingInstrument))
                             {
                                 result.ViolatingInstrument = context.ViolatingInstrument;
+                                result.ViolatingPositionPnL = context.ViolatingPositionPnL;
                             }
                         }
                     }
@@ -109,6 +110,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
 
         // For per-position rules - which instrument violated
         public string ViolatingInstrument { get; set; }
+
+        // P&L of the violating position (for per-position rules)
+        public double ViolatingPositionPnL { get; set; }
     }
 
     /// <summary>

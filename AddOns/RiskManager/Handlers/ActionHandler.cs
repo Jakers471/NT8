@@ -204,14 +204,19 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                         .FirstOrDefault();
                     var reason = result.Violations.FirstOrDefault()?.Message ?? "Rule violated";
 
+                    // Get position P&L for logging
+                    double positionPnL = result.ViolatingPositionPnL;
+                    var pnlStr = positionPnL >= 0 ? $"+${positionPnL:F2}" : $"-${Math.Abs(positionPnL):F2}";
+
                     LogError("═══════════════════════════════════════════════════════");
                     LogError($"   POSITION CLOSED: {instrument}");
+                    LogError($"   P&L: {pnlStr}");
                     LogError($"   Rule: {triggeringRule?.Name ?? "Unknown"}");
                     LogError($"   Reason: {reason}");
                     LogError("═══════════════════════════════════════════════════════");
 
-                    // Record to closure history
-                    RecordClosureEvent(account, instrument, triggeringRule?.Name ?? "Unknown", reason, "FlattenPosition");
+                    // Record to closure history with position P&L
+                    RecordClosureEvent(account, instrument, triggeringRule?.Name ?? "Unknown", reason, "FlattenPosition", positionPnL);
 
                     FlattenPosition(account, instrument);
                     ShowAlert(result);
@@ -552,18 +557,32 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         /// <summary>
         /// Record a closure event to history (persisted to disk)
         /// </summary>
-        private void RecordClosureEvent(Account account, string instrument, string ruleName, string reason, string actionType)
+        private void RecordClosureEvent(Account account, string instrument, string ruleName, string reason, string actionType, double positionPnL = 0)
         {
             try
             {
-                // Get current P&L
-                double pnl = 0;
+                // Get current account P&L
+                double accountPnl = 0;
                 try
                 {
-                    pnl = account.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar)
+                    accountPnl = account.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar)
                         + account.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar);
                 }
                 catch { }
+
+                // Get position P&L if not provided
+                if (positionPnL == 0 && !string.IsNullOrEmpty(instrument))
+                {
+                    try
+                    {
+                        var pos = account.Positions.FirstOrDefault(p => p.Instrument.FullName == instrument);
+                        if (pos != null && pos.MarketPosition != MarketPosition.Flat)
+                        {
+                            positionPnL = pos.GetUnrealizedProfitLoss(PerformanceUnit.Currency);
+                        }
+                    }
+                    catch { }
+                }
 
                 var record = new ClosureRecord
                 {
@@ -573,11 +592,13 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     RuleName = ruleName,
                     Reason = reason,
                     ActionType = actionType,
-                    PnLAtClosure = pnl
+                    PnLAtClosure = accountPnl,
+                    PositionPnL = positionPnL
                 };
 
                 StateManager.RecordClosure(record);
-                LogInfo($"Closure recorded: {actionType} | {instrument ?? "ALL"} | {ruleName}");
+                var pnlStr = positionPnL != 0 ? $" (P&L: {(positionPnL >= 0 ? "+" : "")}{positionPnL:F2})" : "";
+                LogInfo($"Closure recorded: {actionType} | {instrument ?? "ALL"} | {ruleName}{pnlStr}");
             }
             catch (Exception ex)
             {

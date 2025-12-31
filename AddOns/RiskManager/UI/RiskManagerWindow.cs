@@ -614,6 +614,67 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                 Margin = new Thickness(0, 15, 0, 0)
             });
 
+            // ═══════════════════════════════════════════════════════════
+            // SYMBOL SUMMARY SECTION
+            // ═══════════════════════════════════════════════════════════
+            panel.Children.Add(new TextBlock
+            {
+                Text = "CURRENT SYMBOL SETTINGS",
+                FontWeight = FontWeights.Bold,
+                FontSize = 13,
+                Foreground = Brushes.Cyan,
+                Margin = new Thickness(0, 25, 0, 10)
+            });
+
+            // Show max contracts per symbol
+            var maxContractsInfo = new TextBlock
+            {
+                FontSize = 11,
+                Foreground = Brushes.LightGreen,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+
+            if (!string.IsNullOrWhiteSpace(_config.MaxPositionSizePerSymbol))
+            {
+                maxContractsInfo.Text = $"Max Contracts Per Symbol:\n  {_config.MaxPositionSizePerSymbol.Replace(",", "\n  ")}";
+            }
+            else
+            {
+                maxContractsInfo.Text = $"Max Contracts: {_config.MaxPositionSizeDefault} (all symbols)";
+            }
+            panel.Children.Add(maxContractsInfo);
+
+            // Show blocked symbols
+            var blockedInfo = new TextBlock
+            {
+                FontSize = 11,
+                Foreground = Brushes.Salmon,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+
+            if (_config.SymbolBlockEnabled && !string.IsNullOrWhiteSpace(_config.SymbolBlockList))
+            {
+                blockedInfo.Text = $"Blocked Symbols: {_config.SymbolBlockList}";
+            }
+            else
+            {
+                blockedInfo.Text = "Blocked Symbols: None";
+            }
+            panel.Children.Add(blockedInfo);
+
+            // Common futures symbols reference
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Common Futures Symbols:\nES (S&P), NQ (Nasdaq), GC (Gold), CL (Oil),\nNG (Nat Gas), ZB (30Y Bond), RTY (Russell)",
+                FontSize = 10,
+                Foreground = Brushes.Gray,
+                FontStyle = FontStyles.Italic,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 10, 0, 0)
+            });
+
             // Save button
             var saveBtn = new Button
             {
@@ -812,7 +873,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                 {
                     var item = new ListBoxItem
                     {
-                        Content = $"{record.Timestamp:HH:mm:ss} | {record.ActionType} | {record.Instrument ?? "ALL"} | {record.RuleName}",
+                        Content = $"{record.Timestamp:HH:mm:ss} | {record.ActionType} | {record.Instrument ?? "ALL"} | {record.PnLDisplay} | {record.RuleName}",
                         ToolTip = record.Reason,
                         Foreground = record.ActionType == "Lockout" ? Brushes.Red :
                                     record.ActionType == "FlattenAll" ? Brushes.Orange : Brushes.Yellow

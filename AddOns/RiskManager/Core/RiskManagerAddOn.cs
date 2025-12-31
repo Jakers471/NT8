@@ -149,29 +149,29 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     // ═══════════════════════════════════════════════════════════
                     Log("POSITION RULES:");
 
-                    // Position Stop Loss → Flatten position
+                    // Per-Position Unrealized Loss → Flatten position (NOT lockout)
                     if (config.PositionStopEnabled)
                     {
                         _ruleEngine.AddRule(new UnrealizedLossRule
                         {
-                            Name = "Position Stop Loss",
+                            Name = "Per-Position Loss",
                             Enabled = true,
                             MaxLoss = config.PositionStopMax,
                             Action = RuleAction.FlattenPosition
                         });
-                        Log($"  [ON]  Position Stop: ${config.PositionStopMax} → FLATTEN POSITION");
+                        Log($"  [ON]  Per-Position Loss: -${config.PositionStopMax} unrealized → FLATTEN POSITION (no lockout)");
                     }
                     else
                     {
-                        Log($"  [OFF] Position Stop");
+                        Log($"  [OFF] Per-Position Loss");
                     }
 
-                    // Position Take Profit → Flatten position
+                    // Per-Position Unrealized Profit → Flatten position (NOT lockout)
                     if (config.PositionTargetEnabled)
                     {
                         _ruleEngine.AddRule(new UnrealizedProfitRule
                         {
-                            Name = "Position Take Profit",
+                            Name = "Per-Position Profit",
                             Enabled = true,
                             ProfitTarget = config.PositionTargetAmount,
                             Action = RuleAction.FlattenPosition
