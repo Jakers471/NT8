@@ -21,7 +21,9 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         private static readonly string LockoutFile;
         private static readonly string ConfigFile;
         private static readonly string HistoryFile;
+        private static readonly string ErrorLogFile;
         private static readonly object _lock = new object();
+        private static readonly object _logLock = new object();
 
         static StateManager()
         {
@@ -33,6 +35,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             LockoutFile = Path.Combine(DataFolder, "lockouts.xml");
             ConfigFile = Path.Combine(DataFolder, "config.xml");
             HistoryFile = Path.Combine(DataFolder, "closure_history.xml");
+            ErrorLogFile = Path.Combine(DataFolder, "error_log.txt");
 
             // Ensure folder exists
             if (!Directory.Exists(DataFolder))

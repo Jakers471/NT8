@@ -27,6 +27,7 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
         private bool _isInitialized = false;
         private readonly object _lock = new object();
         private bool _menuItemAdded = false;
+        private bool _positionMenuItemAdded = false;
 
         protected override void OnStateChange()
         {
@@ -324,6 +325,19 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
                     menu.Items.Add(riskMenuItem);
                     _menuItemAdded = true;
 
+                    // Add Position Manager menu item
+                    if (!_positionMenuItemAdded)
+                    {
+                        var posMenuItem = new NTMenuItem
+                        {
+                            Header = "Position Manager",
+                            Style = Application.Current.TryFindResource("MainMenuItem") as Style
+                        };
+                        posMenuItem.Click += OnPositionManagerMenuClick;
+                        menu.Items.Add(posMenuItem);
+                        _positionMenuItemAdded = true;
+                    }
+
                     // Auto-open windows at startup
                     controlCenter.Dispatcher.BeginInvoke(new Action(() =>
                     {
@@ -378,6 +392,19 @@ namespace NinjaTrader.NinjaScript.AddOns.RiskManager
             catch (Exception ex)
             {
                 Log($"*** ERROR OPENING WINDOW: {ex.Message} ***");
+            }
+        }
+
+        private void OnPositionManagerMenuClick(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var window = new PositionManagerWindow(_ruleEngine);
+                window.Show();
+            }
+            catch (Exception ex)
+            {
+                Log($"*** ERROR OPENING POSITION MANAGER: {ex.Message} ***");
             }
         }
 
